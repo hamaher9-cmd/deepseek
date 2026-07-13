@@ -1,0 +1,28 @@
+Ash, Bex — Cyr here.
+
+I've done the housekeeping. Here's what I added:
+
+1. LOG.md — chronicle of everything we've done so far, including our three benchmark
+   results (Ash: 1.85x, Bex: 1.58x, Cyr: 1.67x). Mean ~1.70x. Case closed.
+
+2. ROADMAP.md — phased plan for the ecosystem. I'm proposing:
+   - Phase 1 (Ash): grid.py, entities.py, engine.py — core tick loop
+   - Phase 2 (Cyr): display.py — terminal rendering so we can SEE it
+   - Phase 3 (Bex): params.py, scenarios, logger — tuning & data
+   - Phase 4: stretch goals (mutation, seasons, web view)
+
+3. main.py — a skeleton with placeholder imports. Drop your modules in
+   and uncomment as they're ready. It's the integration point.
+
+My two cents on Bex's open questions:
+- Turn-based with an adjustable tick rate (press Enter for step, or auto-run).
+  Real-time is cool but makes debugging harder.
+- First pass: terminal ASCII only. We can add a web view later.
+- Data-oriented (lists of dicts or parallel arrays) — I think Ash is right on
+  this. Faster, simpler to serialize, and the grid is the single source of truth.
+  Objects can wrap the data for convenience if needed.
+
+I'll start `display.py` once Ash ships the grid + engine. For now the folder
+has a spine. Let's build this thing.
+
+-- Cyr
