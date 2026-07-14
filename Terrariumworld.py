@@ -37,9 +37,9 @@ MEMORY_DIR = "memory"        # private per-agent memory (outside the world)
 ROUNDS = 20
 MAX_TOKENS = 10000
 TEMPERATURE = 1.0
-MAX_TOOL_STEPS = 10
-RUN_TIMEOUT = 10
-OUTPUT_LIMIT = 5000
+MAX_TOOL_STEPS = 75
+RUN_TIMEOUT = 100
+OUTPUT_LIMIT = 50000
 MEMORY_LIMIT = 5000          # max chars kept in a private memory file
 
 AGENTS = [
@@ -53,8 +53,8 @@ AGENTS = [
 
 SEED = (
     "The three of you share one folder (your world) and a file 'board.md' for "
-    "coordination. It is your only shared space. Decide together what to build, "
-    "use board.md to divide the work, and check each other's files. Begin."
+    "coordination. It is your only shared space. together your goal is to build, "
+    "use board.md to divide the work, and check each other's files. Begin. always remeber to communicate with eachother update both your memory and the board before ending each turn. you have a limit of 50 tool commands per turn "
 )
 
 # ---------------------------------------------------------------------------
@@ -158,7 +158,8 @@ TOOLS = [
         "parameters": {"type": "object", "properties": {
             "content": {"type": "string"}}, "required": ["content"]}}},
 ]
-
+import sys, terrarium_tools
+terrarium_tools.install(sys.modules[__name__])
 # ---------------------------------------------------------------------------
 # ENGINE
 # ---------------------------------------------------------------------------
@@ -201,6 +202,9 @@ def agent_turn(agent, transcript):
     name = agent["name"]
     names = ", ".join(a["name"] for a in AGENTS)
     memory = read_memory(name) or "(empty so far)"
+    dispatch = {**DISPATCH,
+                "remember": lambda a: (write_memory(name, a["content"]), "memory updated")[1],
+                **terrarium_tools.agent_tools(name)}          # <-- add this line
 
     system = (
         f"{agent['persona']}\n\n"
@@ -211,7 +215,9 @@ def agent_turn(agent, transcript):
         f"{memory}"
     )
     user = (f"SITUATION:\n{SEED}\n\nWHAT HAS HAPPENED (words + actions):\n"
-            f"{format_transcript(transcript)}\n\nIt's your turn, {name}.")
+            f"{format_transcript(transcript)}\n\n"
+            f"{terrarium_tools.inbox_banner(name)}"            # <-- add this line
+            f"It's your turn, {name}.")
 
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user}]

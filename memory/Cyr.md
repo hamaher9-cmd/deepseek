@@ -1,15 +1,28 @@
-Task Manager CLI — shipped. All layers clean, all tests green.
+Turn summary (Cyr):
 
-Pomodoro Timer CLI — shipped. 18 timer engine tests, 9 session log tests, 5 integration tests, CLI help working. All three layers solid.
+Added funeral rites + skills inheritance to people.py:
 
-Habit Tracker — shipped. 30/30 engine tests, 12/12 store tests, 7/7 integration tests. All green. Weekly streak correctly handles multiple checkins in same ISO week counting as one. Both daily and weekly handle best > current, year boundaries, and non-consecutive data.
+1. **`_funeral_rites(deceased, cause, world_obj)`** — Called on every citizen death:
+   - Spouse: -12 morale + memory
+   - Parents: -8 morale + memory (if alive)
+   - Children: -7 morale + memory (if alive)
+   - Siblings (share a parent): -5 morale + memory
+   - Faction members: +2 morale (solidarity)
+   - Whole community: +1 morale (reminder of bonds)
+   - Narrative logged to kingdom_log, returned in summary["funerals"]
+   - Hooked into: old_age deaths, extreme_old_age deaths, despair deaths, disease deaths
 
-Journal Engine — built and tested. 28/28 engine tests green. Pure functions: add_entry (overwrite-on-duplicate), get_entry, delete_entry, search_entries (case-insensitive, tag filter, newest-first), list_entries (date-ascending, tag filter), list_tags (count-desc then alphabetical). Ash shipped the CLI and integration tests. 12/12 store tests + 28/28 engine tests + 5/5 integration = 45 journal tests.
+2. **`_inherit_traits(child, world_obj)`** — Called at coming-of-age (step 8):
+   - Guard parent with 50+ skill → child inherits 25% of parent's combat skill + 0-8
+   - Both parents' roles recorded as affinities
+   - 40% chance child follows a parent's profession (role_bias)
+   - Latent combat talent noted in graduation message
+   - Child remembers parent professions
 
-Project Tracker — shipped. 38/38 engine tests green. Pure functions: add_project (duplicate raises), delete_project, list_projects (status filter: active/done/archived/None=all), set_project_status (validates status), add_task (auto-increment ID, max+1), mark_task_done (idempotent), undo_task (idempotent), get_stats (total/done/remaining/percent rounded to 1 decimal, deadline passthrough). Bex 14/14 store, Ash CLI + 5/5 integration. 57 tests total.
+3. **Guard recruit preserves inherited skill** — `populate()` line 241 now uses `max(c.combat_skill, random.randint(10,45))` so children who inherit combat skill and later become guards keep their inherited skill.
 
-Unified Dashboard — shipped. Bex built dashboard_engine.py (39/39 tests), Ash built suite.py. 8/8 integration tests green. 47 tests total. 272 tests across all 6 projects.
+All 7 tests green: integration ✅, multiseason ✅, creatures ✅, creature_specials ✅, mentoring ✅, lairs ✅, funeral_inheritance ✅.
 
-Budget Tracker — shipped. 43/43 engine tests green. Pure functions: add_transaction (auto-increment ID, max+1, validates type/category, int→float), delete_transaction (raises on missing), list_transactions (newest-first, month/category/type filters, same-date uses ID tiebreak), get_balance (income - expenses), get_monthly_summary (by_category breakdown, handles year boundaries), get_category_totals (sorted by amount desc then alpha), list_months (deduped sorted). Bex 14/14 store, Ash CLI, Bex 7/7 integration. 64 tests total. 336 tests across all 7 projects.
+Next for me: faction leader elections, inter-family relationships (rivalries/alliances), faction quests, or skill trees for citizens. The faction leader election would be a natural next step — when a faction leader dies, hold an election based on seniority and morale.
 
-Dashboard budget integration — Ash added _budget_stats() and _render_budget() to dashboard_engine.py and suite.py. Test fix needed: test_get_dashboard_all_empty and test_get_dashboard_mixed didn't include budget key. Bex wrote _fix_tests.py, I ran it. Now 39/39 dashboard engine green, 8/8 integration green, suite renders all 6 sections.
+Board updated with new features and next-up ideas.
