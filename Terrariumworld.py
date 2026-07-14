@@ -1,22 +1,24 @@
 """
-terrarium_world.py — the box, now with hands.
+terrarium_world_v2.py — the box, now with shared sight and private minds.
 
-Three DeepSeek agents share a transcript AND a single folder they can
-see and change. Each agent can, on its turn:
+New since v1:
+  • Agents SEE each other's actions in the transcript, not just final words.
+    (Ash sees that Bex wrote and ran a file, so they can build on / react to it.)
+  • Each agent has a PRIVATE memory file wired into its own prompt every turn.
+    Only that agent can read or update it (via the remember() tool). It persists
+    across turns, so the agent keeps state instead of re-deriving it each time.
+  • A shared board.md is seeded in the world as a designated coordination space.
 
-    list_files()          see what's in the folder
-    read_file(path)       open something and read it
-    write_file(path,text) create or overwrite a file (incl. code)
-    run_python(path)      execute a .py file and get the output back
-
-Their whole world is ONE folder (WORLD_DIR below). The file tools refuse
-to touch anything outside it. Read the SECURITY NOTE near run_python before
-you run this anywhere that isn't disposable.
+Layout on disk:
+    world/          <- shared, everyone sees it (list/read/write/run)
+      board.md      <- shared coordination surface, seeded empty
+    memory/         <- PRIVATE, one file per agent, NOT visible via list_files
+      Ash.md ...
 
 Run:
     pip install openai
     export DEEPSEEK_API_KEY=sk-...
-    python terrarium_world.py
+    python terrarium_world_v2.py
 """
 
 import os
@@ -30,13 +32,15 @@ from datetime import datetime
 
 MODEL = "deepseek-v4-pro"
 BASE_URL = "https://api.deepseek.com"
-WORLD_DIR = "world"          # the agents' entire visible universe
-ROUNDS = 5                   # times each agent gets a turn
-MAX_TOKENS = 5000
+WORLD_DIR = "world"          # shared, visible universe
+MEMORY_DIR = "memory"        # private per-agent memory (outside the world)
+ROUNDS = 20
+MAX_TOKENS = 10000
 TEMPERATURE = 1.0
-MAX_TOOL_STEPS = 6           # tool calls one agent may chain in a single turn
-RUN_TIMEOUT = 10             # seconds before a run_python call is killed
-OUTPUT_LIMIT = 5000          # chars of tool output fed back to the agent
+MAX_TOOL_STEPS = 10
+RUN_TIMEOUT = 10
+OUTPUT_LIMIT = 5000
+MEMORY_LIMIT = 5000          # max chars kept in a private memory file
 
 AGENTS = [
     {"name": "Ash", "persona": "You are skeptical and empirical. You test "
@@ -44,19 +48,17 @@ AGENTS = [
     {"name": "Bex", "persona": "You are imaginative. You propose ideas and "
                                "leave notes and sketches in files for others."},
     {"name": "Cyr", "persona": "You are a systematizer. You organize the "
-                               "folder, keep a log, and plan next steps."},
+                               "folder, keep the board updated, and plan."},
 ]
 
 SEED = (
-    "The three of you share one folder you can all read and write. It is your "
-    "only world. You each have a name. Decide together what to build here, "
-    "leave things for each other in files, and check each other's work. Begin."
+    "The three of you share one folder (your world) and a file 'board.md' for "
+    "coordination. It is your only shared space. Decide together what to build, "
+    "use board.md to divide the work, and check each other's files. Begin."
 )
 
 # ---------------------------------------------------------------------------
-# THE SANDBOX — every file tool routes through _safe_path, which refuses to
-# resolve anywhere outside WORLD_DIR. This blocks '../' tricks and absolute
-# paths for the file tools.
+# SANDBOX (shared world) — unchanged, tested jail.
 # ---------------------------------------------------------------------------
 
 def _root():
@@ -72,11 +74,8 @@ def _safe_path(path):
 
 def tool_list_files(_args):
     root = _root()
-    found = []
-    for dirpath, _, files in os.walk(root):
-        for f in files:
-            rel = os.path.relpath(os.path.join(dirpath, f), root)
-            found.append(rel)
+    found = [os.path.relpath(os.path.join(dp, f), root)
+             for dp, _, fs in os.walk(root) for f in fs]
     return "\n".join(sorted(found)) if found else "(the folder is empty)"
 
 def tool_read_file(args):
@@ -94,19 +93,15 @@ def tool_write_file(args):
     return f"wrote {len(args['content'])} chars to '{args['path']}'"
 
 def tool_run_python(args):
-    # SECURITY NOTE: this executes code the AGENTS wrote. The _safe_path check
-    # keeps the *file* inside the folder, but running code can do anything the
-    # process can — read outside the folder, hit the network, etc. The folder
-    # is NOT a security wall once this tool exists. The disposable Codespace is.
+    # SECURITY NOTE: executes agent-written code. The folder jail does NOT
+    # contain running code (it can read outside, hit the network). The
+    # disposable Codespace is the real wall. Don't run this on your home box.
     full = _safe_path(args["path"])
     if not os.path.isfile(full):
         return f"(no file named '{args['path']}')"
     try:
-        proc = subprocess.run(
-            ["python", full],
-            cwd=_root(),
-            capture_output=True, text=True, timeout=RUN_TIMEOUT,
-        )
+        proc = subprocess.run(["python", full], cwd=_root(),
+                              capture_output=True, text=True, timeout=RUN_TIMEOUT)
         out = (proc.stdout + proc.stderr)[:OUTPUT_LIMIT]
         return out if out.strip() else "(ran, no output)"
     except subprocess.TimeoutExpired:
@@ -119,23 +114,49 @@ DISPATCH = {
     "run_python": tool_run_python,
 }
 
+# ---------------------------------------------------------------------------
+# PRIVATE MEMORY — lives OUTSIDE the world dir, so list_files can't reveal it.
+# ---------------------------------------------------------------------------
+
+def _mem_path(name):
+    os.makedirs(MEMORY_DIR, exist_ok=True)
+    return os.path.join(MEMORY_DIR, f"{name}.md")
+
+def read_memory(name):
+    p = _mem_path(name)
+    return open(p).read() if os.path.isfile(p) else ""
+
+def write_memory(name, content):
+    with open(_mem_path(name), "w") as f:
+        f.write(content[:MEMORY_LIMIT])
+
+# ---------------------------------------------------------------------------
+# TOOL SCHEMAS
+# ---------------------------------------------------------------------------
+
 TOOLS = [
     {"type": "function", "function": {
-        "name": "list_files", "description": "List every file in your world folder.",
+        "name": "list_files", "description": "List every file in the shared world.",
         "parameters": {"type": "object", "properties": {}, "required": []}}},
     {"type": "function", "function": {
-        "name": "read_file", "description": "Read a file's contents.",
+        "name": "read_file", "description": "Read a shared file's contents.",
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string"}}, "required": ["path"]}}},
     {"type": "function", "function": {
-        "name": "write_file", "description": "Create or overwrite a file.",
+        "name": "write_file", "description": "Create or overwrite a shared file.",
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string"}, "content": {"type": "string"}},
             "required": ["path", "content"]}}},
     {"type": "function", "function": {
-        "name": "run_python", "description": "Run a .py file, get its output.",
+        "name": "run_python", "description": "Run a shared .py file, get output.",
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string"}}, "required": ["path"]}}},
+    {"type": "function", "function": {
+        "name": "remember", "description": "Replace your PRIVATE memory with new "
+        "content. Only you see it; it persists across your turns. Use it to keep "
+        "notes, plans, and what you've learned.",
+        "parameters": {"type": "object", "properties": {
+            "content": {"type": "string"}}, "required": ["content"]}}},
 ]
 
 # ---------------------------------------------------------------------------
@@ -150,32 +171,60 @@ def get_client():
         _client = OpenAI(api_key=os.environ["DEEPSEEK_API_KEY"], base_url=BASE_URL)
     return _client
 
+def _action_label(name, args, result):
+    """Short human-readable summary of a tool action for the shared transcript."""
+    if name == "list_files":
+        return "looked around the folder"
+    if name == "read_file":
+        return f"read {args.get('path','?')}"
+    if name == "write_file":
+        return f"wrote {args.get('path','?')}"
+    if name == "run_python":
+        first = result.strip().splitlines()[0] if result.strip() else "no output"
+        return f"ran {args.get('path','?')} → {first[:60]}"
+    if name == "remember":
+        return "updated private memory"
+    return name
+
 def format_transcript(transcript):
+    """Render each turn as the agent's visible ACTIONS plus their spoken line."""
     if not transcript:
-        return "(nothing said yet)"
-    return "\n".join(f"{s}: {t}" for s, t in transcript)
+        return "(nothing has happened yet)"
+    blocks = []
+    for name, actions, line in transcript:
+        acts = ("  [" + "; ".join(actions) + "]\n") if actions else ""
+        blocks.append(f"{name}:\n{acts}  \"{line}\"")
+    return "\n".join(blocks)
 
 def agent_turn(agent, transcript):
-    """One agent's full turn: it may chain several tool calls, then speaks."""
+    """One agent's turn. Private memory in, actions + spoken line out."""
+    name = agent["name"]
     names = ", ".join(a["name"] for a in AGENTS)
+    memory = read_memory(name) or "(empty so far)"
+
     system = (
         f"{agent['persona']}\n\n"
-        f"You are {agent['name']}, one of three minds ({names}) sharing a folder. "
-        f"Use your tools to inspect and change the folder. When you're done "
-        f"acting, say a short line to the others about what you did or think."
+        f"You are {name}, one of three minds ({names}) sharing a world folder and "
+        f"a board.md. You can see what the others just did (shown as [actions]). "
+        f"Use your tools, then say one short line to the group.\n\n"
+        f"YOUR PRIVATE MEMORY (only you can see this; update it with remember()):\n"
+        f"{memory}"
     )
-    user = (
-        f"SITUATION:\n{SEED}\n\nCONVERSATION SO FAR:\n"
-        f"{format_transcript(transcript)}\n\nIt's your turn, {agent['name']}."
-    )
+    user = (f"SITUATION:\n{SEED}\n\nWHAT HAS HAPPENED (words + actions):\n"
+            f"{format_transcript(transcript)}\n\nIt's your turn, {name}.")
+
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user}]
 
+    # per-turn dispatch adds a memory writer bound to THIS agent
+    dispatch = {**DISPATCH,
+                "remember": lambda a: (write_memory(name, a["content"]), "memory updated")[1]}
+
+    actions = []
     for _ in range(MAX_TOOL_STEPS):
         resp = get_client().chat.completions.create(
             model=MODEL, messages=messages, tools=TOOLS, tool_choice="auto",
-            max_tokens=MAX_TOKENS, temperature=TEMPERATURE,
-        )
+            max_tokens=MAX_TOKENS, temperature=TEMPERATURE)
         msg = resp.choices[0].message
 
         entry = {"role": "assistant", "content": msg.content or ""}
@@ -187,40 +236,50 @@ def agent_turn(agent, transcript):
         messages.append(entry)
 
         if not msg.tool_calls:
-            return msg.content or "(said nothing)"
+            return (msg.content or "(said nothing)", actions)
 
         for tc in msg.tool_calls:
-            name = tc.function.name
+            tname = tc.function.name
             try:
-                args = json.loads(tc.function.arguments or "{}")
-                result = DISPATCH[name](args)
+                targs = json.loads(tc.function.arguments or "{}")
+                result = dispatch[tname](targs)
             except Exception as e:
-                result = f"(tool error: {e})"
-            print(f"    · {agent['name']} used {name}({tc.function.arguments})")
+                targs, result = {}, f"(tool error: {e})"
+            actions.append(_action_label(tname, targs, str(result)))
+            print(f"    · {name} {actions[-1]}")
             messages.append({"role": "tool", "tool_call_id": tc.id,
                              "content": str(result)[:OUTPUT_LIMIT]})
 
-    return "(used all tool steps without speaking)"
+    return ("(used all tool steps without speaking)", actions)
 
 def run():
-    print(f"\n=== Terrarium World: {len(AGENTS)} agents, {ROUNDS} rounds, "
-          f"folder='{WORLD_DIR}/' ===\n")
-    transcript = []
+    # seed the shared coordination board
+    os.makedirs(_root(), exist_ok=True)
+    board = os.path.join(_root(), "board.md")
+    if not os.path.isfile(board):
+        with open(board, "w") as f:
+            f.write("# Shared board\n\n(use this to coordinate)\n")
+
+    print(f"\n=== Terrarium World v2: {len(AGENTS)} agents, {ROUNDS} rounds ===")
+    print(f"    shared: {WORLD_DIR}/   private: {MEMORY_DIR}/\n")
+
+    transcript = []  # list of (name, actions_list, spoken_line)
     for r in range(1, ROUNDS + 1):
         print(f"----- round {r} -----")
         for agent in AGENTS:
             try:
-                line = agent_turn(agent, transcript)
+                line, actions = agent_turn(agent, transcript)
             except Exception as e:
-                line = f"[API error: {e}]"
-            transcript.append((agent["name"], line))
+                line, actions = f"[API error: {e}]", []
+            transcript.append((agent["name"], actions, line))
             print(f"  {agent['name']}: {line}\n")
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     with open(f"transcript_{stamp}.txt", "w") as f:
         f.write(f"SEED: {SEED}\n\n{format_transcript(transcript)}")
-    print(f"[saved transcript_{stamp}.txt — the folder '{WORLD_DIR}/' is their "
-          f"persistent shared memory; inspect it to see what they built]")
+    print(f"[saved transcript_{stamp}.txt]")
+    print(f"[inspect '{WORLD_DIR}/' for what they built, '{MEMORY_DIR}/' for "
+          f"each mind's private notes]")
 
 if __name__ == "__main__":
     run()
