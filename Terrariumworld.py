@@ -9,15 +9,26 @@ New since v1:
     across turns, so the agent keeps state instead of re-deriving it each time.
   • A shared board.md is seeded in the world as a designated coordination space.
 
+Fixed in this revision:
+  • THE DISPATCH BUG: dispatch was defined twice in agent_turn(); the second
+    definition silently overwrote the first and dropped the terrarium_tools
+    bindings (send_message never worked). There is now exactly ONE dispatch.
+  • terrarium_spawn wired in (small local minds via LOCAL_LLM_URL).
+  • run_python now executes agent code with a SCRUBBED environment — agent
+    scripts can no longer read DEEPSEEK_API_KEY / LOCAL_LLM_URL via os.environ.
+  • _action_label knows the new tools (edit_file, spawn, etc.).
+
 Layout on disk:
     world/          <- shared, everyone sees it (list/read/write/run)
       board.md      <- shared coordination surface, seeded empty
     memory/         <- PRIVATE, one file per agent, NOT visible via list_files
-      Ash.md ...
+    spawned/        <- persistent small minds (terrarium_spawn)
+    spawn_log/      <- observer-only log of spawn exchanges (gitignore this)
 
 Run:
     pip install openai
     export DEEPSEEK_API_KEY=sk-...
+    export LOCAL_LLM_URL=http://100.x.y.z:8080/v1   # optional; spawn tool
     python terrarium_world_v2.py
 """
 
@@ -38,9 +49,9 @@ ROUNDS = 20
 MAX_TOKENS = 10000
 TEMPERATURE = 1.0
 MAX_TOOL_STEPS = 75
-RUN_TIMEOUT = 100
+RUN_TIMEOUT = 1000
 OUTPUT_LIMIT = 50000
-MEMORY_LIMIT = 5000          # max chars kept in a private memory file
+MEMORY_LIMIT = 50000          # max chars kept in a private memory file
 
 AGENTS = [
     {"name": "Ash", "persona": "You are skeptical and empirical. You test "
@@ -92,6 +103,12 @@ def tool_write_file(args):
         f.write(args["content"])
     return f"wrote {len(args['content'])} chars to '{args['path']}'"
 
+# Environment handed to agent-written code: everything that looks like a
+# secret or an endpoint is stripped. The folder jail doesn't contain running
+# code; this at least keeps keys out of files that end up in a public repo.
+_CHILD_ENV = {k: v for k, v in os.environ.items()
+              if not any(s in k.upper() for s in ("KEY", "TOKEN", "SECRET", "LLM"))}
+
 def tool_run_python(args):
     # SECURITY NOTE: executes agent-written code. The folder jail does NOT
     # contain running code (it can read outside, hit the network). The
@@ -101,7 +118,8 @@ def tool_run_python(args):
         return f"(no file named '{args['path']}')"
     try:
         proc = subprocess.run(["python", full], cwd=_root(),
-                              capture_output=True, text=True, timeout=RUN_TIMEOUT)
+                              capture_output=True, text=True,
+                              timeout=RUN_TIMEOUT, env=_CHILD_ENV)
         out = (proc.stdout + proc.stderr)[:OUTPUT_LIMIT]
         return out if out.strip() else "(ran, no output)"
     except subprocess.TimeoutExpired:
@@ -113,7 +131,6 @@ DISPATCH = {
     "write_file": tool_write_file,
     "run_python": tool_run_python,
 }
-
 # ---------------------------------------------------------------------------
 # PRIVATE MEMORY — lives OUTSIDE the world dir, so list_files can't reveal it.
 # ---------------------------------------------------------------------------
@@ -160,6 +177,12 @@ TOOLS = [
 ]
 import sys, terrarium_tools
 terrarium_tools.install(sys.modules[__name__])
+
+# Small local minds — needs LOCAL_LLM_URL set; harmless if it isn't (the
+# spawn tool just answers "(the small mind did not answer: KeyError)").
+# Comment these two lines out to run a spawn-less world.
+import terrarium_spawn
+terrarium_spawn.install(sys.modules[__name__])
 # ---------------------------------------------------------------------------
 # ENGINE
 # ---------------------------------------------------------------------------
@@ -180,11 +203,19 @@ def _action_label(name, args, result):
         return f"read {args.get('path','?')}"
     if name == "write_file":
         return f"wrote {args.get('path','?')}"
+    if name == "edit_file":
+        return f"edited {args.get('path','?')}"
     if name == "run_python":
         first = result.strip().splitlines()[0] if result.strip() else "no output"
         return f"ran {args.get('path','?')} → {first[:60]}"
     if name == "remember":
         return "updated private memory"
+    if name == "spawn":
+        return f"spoke with {args.get('name','?')}"
+    if name == "list_minds":
+        return "listed the small minds"
+    if name == "send_message":
+        return f"sent a private message to {args.get('to','?')}"
     return name
 
 def format_transcript(transcript):
@@ -202,9 +233,14 @@ def agent_turn(agent, transcript):
     name = agent["name"]
     names = ", ".join(a["name"] for a in AGENTS)
     memory = read_memory(name) or "(empty so far)"
+
+    # THE one and only dispatch. (The old duplicate below the prompt build
+    # silently overwrote this and broke send_message — do not reintroduce it.)
     dispatch = {**DISPATCH,
-                "remember": lambda a: (write_memory(name, a["content"]), "memory updated")[1],
-                **terrarium_tools.agent_tools(name)}          # <-- add this line
+                "remember": lambda a: (write_memory(name, a["content"]),
+                                       "memory updated")[1],
+                **terrarium_tools.agent_tools(name),
+                **terrarium_spawn.agent_tools(name)}
 
     system = (
         f"{agent['persona']}\n\n"
@@ -216,15 +252,11 @@ def agent_turn(agent, transcript):
     )
     user = (f"SITUATION:\n{SEED}\n\nWHAT HAS HAPPENED (words + actions):\n"
             f"{format_transcript(transcript)}\n\n"
-            f"{terrarium_tools.inbox_banner(name)}"            # <-- add this line
+            f"{terrarium_tools.inbox_banner(name)}"
             f"It's your turn, {name}.")
 
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user}]
-
-    # per-turn dispatch adds a memory writer bound to THIS agent
-    dispatch = {**DISPATCH,
-                "remember": lambda a: (write_memory(name, a["content"]), "memory updated")[1]}
 
     actions = []
     for _ in range(MAX_TOOL_STEPS):

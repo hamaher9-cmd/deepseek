@@ -9,33 +9,8 @@ Private messages are delivered via per-agent inboxes that live OUTSIDE the
 world folder (like memory/), so they never show up in list_files and stay
 invisible to the other agents — a real back-channel.
 
-────────────────────────────────────────────────────────────────────────────
-WIRING — do this once in Terrariumworld.py:
+─────────────────────────────────────────────────────────────────────────────────────────
 
-  (A) After DISPATCH and TOOLS are both defined, add these two lines:
-
-          import sys, terrarium_tools
-          terrarium_tools.install(sys.modules[__name__])
-
-      That alone fully enables the five stateless tools. Nothing else needed.
-
-  (B) For messaging, two one-line edits inside agent_turn():
-
-      1. where the per-turn dispatch is built, add the messaging binding:
-
-             dispatch = {**DISPATCH,
-                         "remember": lambda a: (write_memory(name, a["content"]),
-                                                "memory updated")[1],
-                         **terrarium_tools.agent_tools(name)}      # <-- add
-
-      2. in the `user = (...)` prompt string, inject waiting messages just
-         before the "It's your turn" line:
-
-             f"{terrarium_tools.inbox_banner(name)}"               # <-- add
-             f"It's your turn, {name}."
-
-  If you skip (B), the five file tools still work; only send_message won't.
-────────────────────────────────────────────────────────────────────────────
 """
 
 import os
@@ -107,12 +82,34 @@ def tool_read_lines(args):
     chunk = "".join(lines[start - 1:end])
     return _cap(chunk) if chunk else "(no lines in that range)"
 
+def tool_edit_file(args):
+    """Surgical replace: swap one exact, unique string for another in place.
+    No more rewriting a whole file to change one line."""
+    full = _safe(args["path"])
+    if not os.path.isfile(full):
+        return f"(no file named '{args['path']}')"
+    old, new = args["old_text"], args.get("new_text", "")
+    with open(full) as f:
+        content = f.read()
+    count = content.count(old)
+    if count == 0:
+        return "(old_text not found — it must match the file exactly, " \
+               "including whitespace; use read_lines to check)"
+    if count > 1:
+        return f"(old_text appears {count} times — add surrounding lines " \
+               f"until it is unique)"
+    with open(full, "w") as f:
+        f.write(content.replace(old, new, 1))
+    delta = len(new) - len(old)
+    return f"edited '{args['path']}' ({delta:+d} chars)"
+
 STATELESS = {
     "delete_file": tool_delete_file,
     "rename_file": tool_rename_file,
     "move_file":   tool_move_file,
     "search_files": tool_search_files,
     "read_lines":  tool_read_lines,
+    "edit_file":   tool_edit_file,
 }
 
 
@@ -177,6 +174,18 @@ NEW_TOOLS = [
             "path": {"type": "string"},
             "start": {"type": "integer"}, "end": {"type": "integer"}},
             "required": ["path"]}}},
+    {"type": "function", "function": {
+        "name": "edit_file",
+        "description": "Replace ONE exact, unique string in a file with new "
+                       "text, leaving the rest untouched. old_text must match "
+                       "the file exactly (whitespace included) and appear only "
+                       "once. Use this instead of write_file when changing "
+                       "part of an existing file.",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string"},
+            "old_text": {"type": "string"},
+            "new_text": {"type": "string"}},
+            "required": ["path", "old_text", "new_text"]}}},
     {"type": "function", "function": {
         "name": "send_message",
         "description": "Send a PRIVATE message to one other agent by name. The "
